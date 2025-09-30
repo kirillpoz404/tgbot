@@ -9,4 +9,4 @@
 openai==0.28.0\
 sqlite3-binary\
 apscheduler==3.10.4\
-python-dateutil}
+python-dateutil
