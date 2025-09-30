@@ -1,12 +1,11 @@
 
 import sqlite3
 import openai
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dateutil import parser
 from datetime import datetime
-import os
+
+import os
 # ==== НАСТРОЙКИ ====
 TELEGRAM_TOKEN = "TELEGRAM_TOKEN"
 OPENAI_KEY = "OPENAI_KEY"
@@ -195,4 +194,5 @@ async def chat_with_gpt(message: types.Message):
 if __name__ == "__main__":
     scheduler.start()
     executor.start_polling(dp, skip_updates=True)
+
 TG
