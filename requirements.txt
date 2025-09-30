@@ -1,5 +1,5 @@
 aiogram==2.25.1
 openai==0.28.0
-sqlite3-binary
+sqlite3==3.7.0
 apscheduler==3.10.4
 python-dateutil
