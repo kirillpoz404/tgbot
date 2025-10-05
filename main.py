@@ -1,140 +1,134 @@
 import os
-import sqlite3
-from datetime import datetime
-from dotenv import load_dotenv
+import requests
+import asyncio
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    filters, ContextTypes
 )
-from openai import OpenAI
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
-load_dotenv()
+# === Конфигурация ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_KEY")
+MODEL = "mistralai/mistral-7b"
 
-if not TELEGRAM_TOKEN or not OPENAI_KEY:
-    raise ValueError("❌ Missing TELEGRAM_TOKEN or OPENAI_KEY in .env file")
+# === Хранилище задач (в памяти) ===
+user_tasks = {}
+reminder_jobs = {}
 
-client = OpenAI(api_key=OPENAI_KEY)
+# === ChatGPT через OpenRouter ===
+async def ask_ai(prompt: str):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-# --- БАЗА ДАННЫХ ---
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS tasks (
-    task_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    title TEXT NOT NULL,
-    description TEXT,
-    due_date TIMESTAMP,
-    completed INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
-)
-""")
-
-conn.commit()
-
-# --- КОМАНДЫ ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    cursor.execute("""
-        INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
-        VALUES (?, ?, ?, ?)
-    """, (user.id, user.username, user.first_name, user.last_name))
-    conn.commit()
-
-    await update.message.reply_text(
-        f"Привет, {user.first_name}! 👋\n"
-        "Я твой персональный ассистент и органайзер.\n"
-        "Используй /add для добавления задачи, /tasks для просмотра задач или просто напиши мне вопрос."
-    )
-
-
-async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) == 0:
-        await update.message.reply_text("Использование: /add <название задачи>")
-        return
-
-    title = " ".join(context.args)
-    cursor.execute("INSERT INTO tasks (user_id, title) VALUES (?, ?)", (update.effective_user.id, title))
-    conn.commit()
-    await update.message.reply_text(f"✅ Задача добавлена: {title}")
-
-
-async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT title, completed FROM tasks WHERE user_id=?", (update.effective_user.id,))
-    tasks = cursor.fetchall()
-
-    if not tasks:
-        await update.message.reply_text("У тебя пока нет задач 🗒️")
-        return
-
-    response = "\n".join(
-        [f"{'✅' if t[1] else '🔹'} {t[0]}" for t in tasks]
-    )
-    await update.message.reply_text(f"Твои задачи:\n{response}")
-
-
-async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    await update.message.chat.send_action("typing")
+    data = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": "Ты дружелюбный AI-ассистент, отвечай кратко и по существу."},
+            {"role": "user", "content": prompt}
+        ]
+    }
 
     try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Ты умный, дружелюбный ассистент, который помогает пользователю с задачами и идеями."},
-                {"role": "user", "content": user_message}
-            ]
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers, json=data, timeout=30
         )
-        reply = completion.choices[0].message.content
-        await update.message.reply_text(reply)
-
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        await update.message.reply_text("⚠️ Ошибка при обращении к OpenAI API")
-        print("OpenAI error:", e)
+        return f"Ошибка при обращении к OpenRouter API: {e}"
 
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === Команды ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/start — начать работу\n"
-        "/add <текст> — добавить задачу\n"
-        "/tasks — показать список задач\n"
-        "Просто напиши мне — и я помогу советом 💬"
+        "Привет 👋 Я твой AI-помощник!\n\n"
+        "Доступные команды:\n"
+        "/todo — добавить задачу\n"
+        "/tasks — список задач\n"
+        "/done — удалить задачу\n"
+        "/remind — напоминать каждые 5 часов\n\n"
+        "А ещё я умею отвечать на любые вопросы 🧠"
     )
 
+async def todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    task_text = " ".join(context.args)
 
-# --- ЗАПУСК ПРИЛОЖЕНИЯ ---
-def main():
+    if not task_text:
+        await update.message.reply_text("✏️ Используй: `/todo купить хлеб`")
+        return
+
+    user_tasks.setdefault(user_id, []).append(task_text)
+    await update.message.reply_text(f"✅ Задача добавлена: {task_text}")
+
+async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    tasks = user_tasks.get(user_id, [])
+
+    if not tasks:
+        await update.message.reply_text("📭 У тебя пока нет задач.")
+        return
+
+    task_list = "\n".join([f"{i+1}. {t}" for i, t in enumerate(tasks)])
+    await update.message.reply_text(f"🗒 Твои задачи:\n\n{task_list}")
+
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    tasks = user_tasks.get(user_id, [])
+
+    if not tasks:
+        await update.message.reply_text("❌ Нет задач для удаления.")
+        return
+
+    try:
+        task_num = int(context.args[0]) - 1
+        removed = tasks.pop(task_num)
+        await update.message.reply_text(f"🗑 Задача удалена: {removed}")
+    except (IndexError, ValueError):
+        await update.message.reply_text("⚠️ Используй: `/done 1` чтобы удалить первую задачу.")
+
+async def remind_user(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.chat_id
+    tasks = user_tasks.get(user_id, [])
+    if tasks:
+        task_list = "\n".join([f"• {t}" for t in tasks])
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"⏰ Напоминание! У тебя есть задачи:\n\n{task_list}"
+        )
+
+async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.chat_id
+
+    if user_id in reminder_jobs:
+        reminder_jobs[user_id].schedule_removal()
+        del reminder_jobs[user_id]
+        await update.message.reply_text("🔕 Напоминания отключены.")
+        return
+
+    job = context.job_queue.run_repeating(remind_user, interval=5 * 60 * 60, first=5, chat_id=user_id)
+    reminder_jobs[user_id] = job
+    await update.message.reply_text("🔔 Теперь я буду напоминать о задачах каждые 5 часов!")
+
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+    reply = await asyncio.to_thread(ask_ai, user_message)
+    await update.message.reply_text(reply)
+
+# === Запуск ===
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("add", add_task))
-    app.add_handler(CommandHandler("tasks", list_tasks))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat))
+    app.add_handler(CommandHandler("todo", todo))
+    app.add_handler(CommandHandler("tasks", tasks))
+    app.add_handler(CommandHandler("done", done))
+    app.add_handler(CommandHandler("remind", remind))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-    print("🤖 Бот запущен...")
+    print("🤖 Бот запущен!")
     app.run_polling()
 
-
-if __name__ == "__main__":
-    main()
